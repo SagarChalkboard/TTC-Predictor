@@ -1,0 +1,50 @@
+modules = ["nodejs-20", "python-3.11", "web"]
+
+[nix]
+channel = "stable-24_05"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[[ports]]
+localPort = 3001
+externalPort = 3001
+
+[[ports]]
+localPort = 5000
+externalPort = 5000
+
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
+[workflows]
+runButton = "Start Full App"
+
+[[workflows.workflow]]
+name = "Start API"
+author = 33406855
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd ttc-dashboard && python api/app.py"
+
+[[workflows.workflow]]
+name = "Start React App"
+author = 33406855
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd ttc-dashboard && npm start"
+
+[[workflows.workflow]]
+name = "Start Full App"
+author = 33406855
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd ttc-dashboard && npm run build && python api/app.py"
