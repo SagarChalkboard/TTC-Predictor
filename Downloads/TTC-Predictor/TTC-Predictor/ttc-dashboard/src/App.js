@@ -36,7 +36,8 @@ const TTCDelayDashboard = () => {
     subway_line: "YU",
     temperature: 15,
     precipitation: 0,
-    is_weekend: new Date().getDay() >= 5,
+    // Weekend should only include Saturday (6) and Sunday (0)
+    is_weekend: [0, 6].includes(new Date().getDay()),
   });
 
   const stations = {
