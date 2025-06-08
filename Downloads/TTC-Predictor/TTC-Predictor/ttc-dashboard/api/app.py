@@ -3,9 +3,45 @@ from flask_cors import CORS
 import numpy as np
 from datetime import datetime
 import os
+import joblib
+from sklearn.ensemble import RandomForestRegressor
+import pandas as pd
 
 app = Flask(__name__, static_folder='../build')
 CORS(app)
+
+# Load the trained model
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models/trained/optimized_rf.joblib')
+try:
+    model = joblib.load(MODEL_PATH)
+    print("✅ Model loaded successfully")
+except Exception as e:
+    print(f"⚠️ Could not load model: {str(e)}")
+    print("⚠️ Using fallback prediction rules")
+    model = None
+
+def predict_with_model(features):
+    if model is not None:
+        try:
+            # Convert features to model input format
+            feature_names = [
+                'hour', 'month', 'day_of_month', 'week_of_year',
+                'is_weekend', 'is_rush_hour', 'is_morning_rush', 'is_evening_rush',
+                'temperature', 'precipitation', 'is_extreme_cold', 'is_extreme_hot',
+                'has_precipitation', 'heavy_precipitation', 'is_major_station',
+                'delays_last_7days', 'delay_count_last_7days'
+            ]
+            
+            # Create DataFrame with correct feature order
+            X = pd.DataFrame([features], columns=feature_names)
+            
+            # Make prediction
+            prediction = model.predict(X)[0]
+            return prediction
+        except Exception as e:
+            print(f"⚠️ Model prediction failed: {str(e)}")
+            return None
+    return None
 
 @app.route('/')
 def serve_react_app():
@@ -48,54 +84,72 @@ def predict():
             return jsonify({'error': 'No data provided'}), 400
 
         # Extract features from request
-        hour = int(data.get('hour', 0))
-        station = data.get('station', '')
-        temperature = float(data.get('temperature', 15))
-        precipitation = float(data.get('precipitation', 0))
-        is_weekend = data.get('is_weekend', False)
+        current_date = datetime.now()
+        features = {
+            'hour': int(data.get('hour', 0)),
+            'month': current_date.month,
+            'day_of_month': current_date.day,
+            'week_of_year': current_date.isocalendar()[1],
+            'is_weekend': data.get('is_weekend', False),
+            'is_rush_hour': data.get('hour') in [7, 8, 17, 18, 19],
+            'is_morning_rush': data.get('hour') in [7, 8],
+            'is_evening_rush': data.get('hour') in [17, 18, 19],
+            'temperature': float(data.get('temperature', 15)),
+            'precipitation': float(data.get('precipitation', 0)),
+            'is_extreme_cold': float(data.get('temperature', 15)) < -10,
+            'is_extreme_hot': float(data.get('temperature', 15)) > 30,
+            'has_precipitation': float(data.get('precipitation', 0)) > 0,
+            'heavy_precipitation': float(data.get('precipitation', 0)) > 5,
+            'is_major_station': data.get('station') in ['UNION', 'BLOOR-YONGE', 'ST GEORGE', 'EGLINTON', 'FINCH'],
+            'delays_last_7days': 3.5,  # This should come from historical data
+            'delay_count_last_7days': 5  # This should come from historical data
+        }
 
-        # Smart prediction algorithm based on real TTC patterns
-        prediction = 2.0  # Base delay
+        # Try model prediction first
+        prediction = predict_with_model(features)
+        
+        # Fallback to rule-based prediction if model fails
+        if prediction is None:
+            prediction = 2.0  # Base delay
+            
+            # Rush hour increases delay significantly
+            if features['hour'] in [7, 8]:  # Morning rush
+                prediction += 4.0
+            elif features['hour'] in [17, 18, 19]:  # Evening rush
+                prediction += 3.5
+            elif features['hour'] in [6, 9, 16, 20]:  # Near rush hours
+                prediction += 1.5
 
-        # Rush hour increases delay significantly
-        if hour in [7, 8]:  # Morning rush
-            prediction += 4.0
-        elif hour in [17, 18, 19]:  # Evening rush
-            prediction += 3.5
-        elif hour in [6, 9, 16, 20]:  # Near rush hours
-            prediction += 1.5
+            # Major stations have higher delays
+            if features['is_major_station']:
+                prediction += 2.0
 
-        # Major stations have higher delays
-        major_stations = ['UNION', 'BLOOR-YONGE', 'ST GEORGE', 'EGLINTON', 'FINCH']
-        if station in major_stations:
-            prediction += 2.0
+            # Weather impact
+            if features['has_precipitation']:
+                prediction += features['precipitation'] * 0.4
 
-        # Weather impact
-        if precipitation > 0:
-            prediction += precipitation * 0.4  # Rain/snow slows everything
+            if features['is_extreme_cold']:
+                prediction += 3.0
+            elif features['temperature'] < 0:
+                prediction += 1.0
+            elif features['is_extreme_hot']:
+                prediction += 2.0
 
-        if temperature < -15:  # Extreme cold
-            prediction += 3.0
-        elif temperature < 0:  # Cold weather
-            prediction += 1.0
-        elif temperature > 35:  # Extreme heat
-            prediction += 2.0
+            # Weekend is typically better
+            if features['is_weekend']:
+                prediction *= 0.6
 
-        # Weekend is typically better
-        if is_weekend:
-            prediction *= 0.6
+            # Line-specific adjustments
+            subway_line = data.get('subway_line', 'YU')
+            if subway_line == 'BD':
+                prediction += 0.5
+            elif subway_line == 'SHP':
+                prediction *= 0.7
+            elif subway_line == 'SRT':
+                prediction += 1.0
 
-        # Line-specific adjustments
-        subway_line = data.get('subway_line', 'YU')
-        if subway_line == 'BD':  # Bloor-Danforth often busier
-            prediction += 0.5
-        elif subway_line == 'SHP':  # Sheppard is shorter, less delays
-            prediction *= 0.7
-        elif subway_line == 'SRT':  # Scarborough RT has issues
-            prediction += 1.0
-
-        # Add realistic variation
-        prediction += np.random.normal(0, 0.8)
+            # Add realistic variation
+            prediction += np.random.normal(0, 0.8)
 
         # Ensure reasonable bounds
         prediction = max(0.1, min(prediction, 25))
@@ -110,14 +164,14 @@ def predict():
         else:
             category, severity = "Major Delay", "critical"
 
-        # Calculate realistic confidence
+        # Calculate confidence
         base_confidence = 85
-        if is_weekend:
-            base_confidence += 5  # More predictable on weekends
-        if hour in [7, 8, 17, 18, 19]:
-            base_confidence += 3  # Rush hour is predictable
-        if precipitation > 5:
-            base_confidence -= 10  # Weather makes it less predictable
+        if features['is_weekend']:
+            base_confidence += 5
+        if features['is_rush_hour']:
+            base_confidence += 3
+        if features['heavy_precipitation']:
+            base_confidence -= 10
 
         confidence = min(95, max(65, base_confidence + np.random.normal(0, 3)))
 
@@ -126,8 +180,8 @@ def predict():
             'category': category,
             'severity': severity,
             'confidence': f"{confidence:.1f}%",
-            'model_used': 'optimized_rf',
-            'features_used': 10
+            'model_used': 'optimized_rf' if model is not None else 'rule_based',
+            'features_used': len(features)
         })
 
     except Exception as e:
@@ -169,7 +223,10 @@ def get_stats():
     })
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV', 'production') == 'development'
+    
     print("🚇 Loading TTC Delay Prediction API...")
     print("✅ API ready and running!")
-    print("🌐 React app should connect at http://0.0.0.0:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    print(f"🌐 React app should connect at http://0.0.0.0:{port}")
+    app.run(debug=debug, host='0.0.0.0', port=port)
